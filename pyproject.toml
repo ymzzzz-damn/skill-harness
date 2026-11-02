@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yumuzhen-harness"
+version = "0.1.0"
+description = "Independent native RoboDojo code-agent harness"
+requires-python = ">=3.10"
+
+[project.scripts]
+harnesslab = "harnesslab.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["harnesslab*"]
