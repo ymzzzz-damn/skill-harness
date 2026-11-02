@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Any
-from .agent import DISABLED_FEATURES, run_codex
+from .agent import DEFAULT_MAX_CONTEXT_IMAGES, DISABLED_FEATURES, run_codex
 from .policy import CodePolicy
 from .prompt import build_prompt
 from .serialization import jsonable, write_json
@@ -198,6 +198,7 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
                 primitives: str = "no-vla", images: str = "on-motion",
                 feedback: str = "rich", tool_set: str = "strong-grasp",
                 task_conditions: bool = False,
+                max_context_images: int | None = DEFAULT_MAX_CONTEXT_IMAGES,
                 **compatibility: Any) -> dict[str, Any]:
     """Fresh native scene, fresh policy/agent, frozen tool, native scoring/video.
 
@@ -219,6 +220,9 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
         raise ValueError("tool_set must be pyrua or strong-grasp")
     if type(task_conditions) is not bool:
         raise ValueError("task_conditions must be boolean")
+    if max_context_images is not None and (type(max_context_images) is not int
+                                          or not 1 <= max_context_images <= 50):
+        raise ValueError("max_context_images must be an integer from 1 to 50, or None")
     if (not math.isfinite(float(budget_s)) or float(budget_s) <= 0 or
             not isinstance(max_turns, int) or isinstance(max_turns, bool) or max_turns < 1):
         raise ValueError("positive budget_s and max_turns required")
@@ -245,8 +249,9 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
     started = time.perf_counter()
     result: dict[str, Any] = {
         "schema": "harness-native-test-v1", "system": "harness",
-        "framework_version": "0.2.0", "arm": arm, "runtime": runtime,
+        "framework_version": "0.2.1", "arm": arm, "runtime": runtime,
         "tool_set": tool_set, "task_conditions": task_conditions,
+        "max_context_images": max_context_images,
         "agent_features": {"disabled": list(DISABLED_FEATURES)},
         "robot": robot, "backend": robot, "task": cell.task, "suite": cell.suite,
         "seed": cell.seed, "model": model, "reasoning_effort": reasoning_effort,
@@ -331,8 +336,10 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
             model=model, reasoning_effort=reasoning_effort, budget_s=budget_s,
             out_dir=out_dir, mcp_url=mcp_url, codex_bin=codex_bin,
             codex_home=codex_home, base_url=base_url, api_key_env=api_key_env,
+            max_context_images=max_context_images,
             should_stop=observe_native_end)
         result["generation"], result["status"] = generation, generation["status"]
+        result["image_context"] = generation.get("image_context")
         result["codex_returncode"] = generation["returncode"]
         result["policy_wall_s"] = time.perf_counter() - policy_started
         result["finish"] = policy.finish
