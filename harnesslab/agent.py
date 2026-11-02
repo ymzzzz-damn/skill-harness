@@ -9,6 +9,8 @@ import subprocess
 import time
 from typing import Any, Callable
 
+DISABLED_FEATURES = ("shell_snapshot", "memories", "shell_tool")
+
 def audit_events(path: Path) -> dict[str, Any]:
     total_usage: dict[str, int] = {}
     tool_calls: dict[str, int] = {}
@@ -64,8 +66,9 @@ def run_codex(prompt: str, images: list[str], *, toolkit: Any, model: str,
             "-c", f"model_reasoning_effort={json.dumps(reasoning_effort)}",
             "-c", f"mcp_servers.harness.url={json.dumps(mcp_url)}",
             "-c", "project_doc_max_bytes=0",
-            *codex_catalog_flags(model), "--disable", "shell_snapshot",
-            "--disable", "memories", *provider_overrides(base_url, api_key_env),
+            *codex_catalog_flags(model),
+            *[arg for feature in DISABLED_FEATURES for arg in ("--disable", feature)],
+            *provider_overrides(base_url, api_key_env),
             "-s", "workspace-write", "-C", str(workspace),
             "--skip-git-repo-check", "--json", "-o", str(out_dir / "last_message.md")]
     for image in images:
@@ -110,5 +113,6 @@ def run_codex(prompt: str, images: list[str], *, toolkit: Any, model: str,
         returncode = process.wait()
     generation = audit_events(events)
     generation.update(status=status, returncode=returncode, attempts=1,
-                      wall_s=time.perf_counter() - started)
+                      wall_s=time.perf_counter() - started,
+                      disabled_features=list(DISABLED_FEATURES))
     return generation

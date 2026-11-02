@@ -1,5 +1,7 @@
 from __future__ import annotations
 import copy
+import builtins
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import tempfile
@@ -14,6 +16,12 @@ CONTENT_RECONNECT = {"type": "error", "message":
 PROGRESS = {"type": "item.completed", "item": {
             "type": "mcp_tool_call", "status": "completed", "error": None, "tool": "python"}}
 
+class FakeClock:
+    """Stage durations change only when a fixture advances the clock."""
+    def __init__(self): self.now = 1000.0
+    def perf_counter(self): return self.now
+    def advance(self, seconds): self.now += seconds
+
 class RunnerTests(unittest.TestCase):
     def setUp(self):
         temporary_root = Path(__file__).resolve().parents[2] / "experiments/cpu-tests/tmp"
@@ -25,8 +33,13 @@ class RunnerTests(unittest.TestCase):
 
     def run_fake(self, native_success=False, failure=False, *,
                  generation=None, events=None, agent_finish=True,
-                 native_end=False, report=True, report_layout=0, budget=False):
+                 native_end=False, report=True, report_layout=0, budget=False,
+                 tool_set="strong-grasp", task_conditions=False, clock=None,
+                 agent_tail_s=0, poll_after_tail=False, guard_action=False,
+                 prepatched_grasp=False):
         order, root = self.order, self.root
+        def elapsed(seconds):
+            if clock is not None: clock.advance(seconds)
         class Ledger:
             records = []
             def __len__(self): return 0
@@ -34,12 +47,15 @@ class RunnerTests(unittest.TestCase):
             def env_steps(self): return 0
             def write_jsonl(self, path): path.write_text("")
         class Native:
-            pass
+            def execute_tool(self, name, input_dict):
+                order.append("native_dispatch")
+                return {"ok": True}
         native = Native()
         class Backend:
             over = False
             def conclude(self):
                 order.append("native_conclude")
+                elapsed(2)
                 self.over = True
             def solved(self): order.append("native_score"); return native_success
             def env_steps(self): return 7
@@ -47,16 +63,23 @@ class RunnerTests(unittest.TestCase):
         backend = Backend()
         class Robot:
             def __init__(self, current_backend, **kw):
-                if not getattr(native, "installed", False):
+                if tool_set == "strong-grasp" and not getattr(native, "installed", False):
                     raise AssertionError("strong_grasp must install before Robot")
+                if tool_set == "pyrua" and getattr(native, "installed", False):
+                    raise AssertionError("original PyRUA must not install strong_grasp")
+                elapsed(3)
                 order.append("robot")
+        if prepatched_grasp:
+            Robot.grasp = lambda *args, **kwargs: None
         class Host:
             def boot(self, cell, out, **kw):
                 order.append("native_boot")
+                elapsed(100)
                 return native, []
             def make_backend(self, current): return backend
             def dump_card(self, current, cell, out):
                 order.append("initial_observation")
+                elapsed(30)
                 return types.SimpleNamespace(task_language="lift object", max_env_steps=200,
                                              images={"head": "head.png"})
         host = Host()
@@ -69,17 +92,36 @@ class RunnerTests(unittest.TestCase):
             def __init__(self, robo, workspace, **kw):
                 order.append("fresh_code_policy")
                 self.robo = robo
+                elapsed(2)
+                self.kwargs = kw
+                owner.policy_kwargs = kw
+            def before_native_action(self, name, kwargs):
+                order.append("before_native_action")
+            def after_native_action(self, name, before, after):
+                order.append("after_native_action")
         class Server:
             def __init__(self, toolkit, **kw): order.append("mcp")
-            def start(self): return "http://127.0.0.1:1/mcp/"
-            def stop(self): order.append("mcp_stop")
+            def start(self):
+                elapsed(7)
+                return "http://127.0.0.1:1/mcp/"
+            def stop(self):
+                elapsed(17)
+                order.append("mcp_stop")
+        owner = self
+        def prompt(*args, **kw):
+            elapsed(5)
+            owner.prompt_kwargs = kw
+            return "prompt"
         def install(current, robot_cls):
             order.append("install_grasp")
             current.installed = True
         def agent(prompt, images, **kw):
             order.append("agent")
+            elapsed(30)
             if failure:
                 raise RuntimeError("provider disconnected")
+            if guard_action:
+                native.execute_tool("move_pose", {"position": [1, 2, 3]})
             if events is not None:
                 (root / "episode/codex_events.jsonl").write_text(
                     "\n".join(json.dumps(event) for event in events) + "\n")
@@ -87,9 +129,13 @@ class RunnerTests(unittest.TestCase):
                 kw["toolkit"].finish = {"status": "success", "summary": "agent claim"}
             backend.over = native_end
             kw["should_stop"]()
+            elapsed(agent_tail_s)
+            if poll_after_tail:
+                kw["should_stop"]()
             return copy.deepcopy(generation or {"status": "completed", "returncode": 0, "errors": []})
         def cleanup(*args):
             order.append("native_cleanup")
+            elapsed(23)
             # Actual client writes the final report while stopping. This fixture
             # catches regressions that classify before that write is complete.
             if report:
@@ -110,16 +156,93 @@ class RunnerTests(unittest.TestCase):
             "pyrualean": module("pyrualean"),
             "pyrualean._backend": module("pyrualean._backend", Ledger=Ledger),
             "pyrualean.hosts.common": module("pyrualean.hosts.common", stop_all=cleanup),
+            "pyrualean.hosts.robodojo_native": module("pyrualean.hosts.robodojo_native",
+                                                     STATEFUL={"move_pose"}),
             "pyrualean.mcp_server": module("pyrualean.mcp_server", ArmMcpServer=Server),
             "pyrualean.robots": module("pyrualean.robots", get_adapter=lambda _: adapter),
             "strong_grasp": module("strong_grasp", install=install, grasp=lambda *a, **kw: None),
         }
         cell = types.SimpleNamespace(task="general_pickup", suite="arx_x5", seed=0,
                                      cuda_device=0)
-        with patch.dict("sys.modules", modules), patch.object(runner, "CodePolicy", Policy), \
-             patch.object(runner, "build_prompt", lambda *a, **kw: "prompt"), \
-             patch.object(runner, "run_codex", agent):
-            return runner.run_episode(cell, root / "episode", model="fixed-model")
+        original_import = builtins.__import__
+        def check_import(name, *args, **kwargs):
+            if tool_set == "pyrua" and (name == "strong_grasp" or name.startswith("strong_grasp.")):
+                raise AssertionError("original-tool runs may not import strong_grasp")
+            return original_import(name, *args, **kwargs)
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict("sys.modules", modules))
+            stack.enter_context(patch.object(runner, "CodePolicy", Policy))
+            stack.enter_context(patch.object(runner, "build_prompt", prompt))
+            stack.enter_context(patch.object(runner, "run_codex", agent))
+            stack.enter_context(patch("builtins.__import__", check_import))
+            if clock is not None:
+                stack.enter_context(patch.object(runner.time, "perf_counter", clock.perf_counter))
+            return runner.run_episode(cell, root / "episode", model="fixed-model",
+                                      tool_set=tool_set, task_conditions=task_conditions)
+
+    def test_original_pyrua_mode_has_no_grasp_injection_or_dependency(self):
+        result = self.run_fake(tool_set="pyrua")
+        self.assertNotIn("install_grasp", self.order)
+        self.assertIsNone(self.policy_kwargs["grasp"])
+        self.assertEqual(result["tool_set"], "pyrua")
+        self.assertFalse(result["task_conditions"])
+        self.assertFalse(result["robot_tools"]["grasp_installed"])
+        self.assertFalse(result["robot_tools"]["global_grasp_supplied"])
+        self.assertEqual(set(result["dependencies"]), {"pyrualean", "harnesslab"})
+        self.assertTrue(result["dependencies"]["harnesslab"]["sha256"])
+        self.assertEqual(self.prompt_kwargs["tool_set"], "pyrua")
+
+    def test_invalid_tool_set_or_condition_type_fails_before_native_boot(self):
+        for kwargs in ({"tool_set": "new-tool"}, {"task_conditions": 1},
+                       {"task_conditions": "true"}, {"task_conditions": None}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                runner.run_episode(types.SimpleNamespace(), self.root / "episode",
+                                   model="fixed", **kwargs)
+        self.assertFalse(self.order)
+        self.assertFalse((self.root / "episode").exists())
+
+    def test_condition_arm_installs_native_guard_before_agent_actions(self):
+        result = self.run_fake(tool_set="pyrua", task_conditions=True, guard_action=True)
+        self.assertTrue(result["task_conditions"])
+        self.assertTrue(self.policy_kwargs["task_conditions"])
+        self.assertTrue(self.prompt_kwargs["task_conditions"])
+        self.assertIsNone(self.policy_kwargs["grasp"])
+        self.assertLess(self.order.index("before_native_action"), self.order.index("native_dispatch"))
+        self.assertLess(self.order.index("native_dispatch"), self.order.index("after_native_action"))
+        self.assertNotIn("strong_grasp", result["dependencies"])
+
+    def test_original_tool_arm_refuses_a_previously_patched_robot_class(self):
+        with self.assertRaisesRegex(RuntimeError, "clean, unpatched robot class"):
+            self.run_fake(tool_set="pyrua", prepatched_grasp=True)
+        self.assertNotIn("native_boot", self.order)
+        self.assertNotIn("agent", self.order)
+
+    def test_task_wall_excludes_loading_but_includes_framework_model_and_conclusion(self):
+        clock = FakeClock()
+        result = self.run_fake(tool_set="pyrua", clock=clock, agent_tail_s=11)
+        # Initial RGB becomes ready after 130 s of scene/card initialization.
+        # Task work includes 17 s framework setup, 41 s model/control, 2 s conclude.
+        self.assertEqual(result["task_wall_s"], 60)
+        self.assertEqual(result["policy_wall_s"], 41)
+        self.assertEqual(result["total_wall_s"], 230)
+        self.assertTrue(result["task_timing"]["end_observed"])
+        self.assertEqual(result["task_wall_s"] + 130 + 40, result["total_wall_s"])
+
+    def test_task_clock_stops_at_first_native_end_and_ignores_later_planner_tail(self):
+        result = self.run_fake(tool_set="pyrua", native_success=True, native_end=True,
+                               clock=FakeClock(), agent_tail_s=11, poll_after_tail=True)
+        self.assertEqual(result["task_wall_s"], 47)
+        self.assertEqual(result["policy_wall_s"], 41)
+        self.assertEqual(result["total_wall_s"], 230)
+        self.assertTrue(result["native_end_observed_during_agent"])
+        self.assertTrue(result["environment_success"])
+
+    def test_task_clock_survives_provider_failure_and_excludes_cleanup(self):
+        result = self.run_fake(tool_set="pyrua", clock=FakeClock(), failure=True)
+        self.assertEqual(result["task_wall_s"], 47)
+        self.assertEqual(result["total_wall_s"], 217)
+        self.assertFalse(result["task_timing"]["end_observed"])
+        self.assertEqual(result["status"], "error")
 
     def test_native_success_is_separate_from_agent_finish(self):
         result = self.run_fake(native_success=False)

@@ -12,10 +12,32 @@ from pathlib import Path
 import sys
 import time
 from typing import Any
-from .agent import run_codex
+from .agent import DISABLED_FEATURES, run_codex
 from .policy import CodePolicy
 from .prompt import build_prompt
 from .serialization import jsonable, write_json
+
+
+def _guard_native_actions(toolkit: Any, backend: Any, policy: Any) -> None:
+    """Check task conditions at the real primitive dispatch boundary.
+
+    The SDK, action implementations and observations remain unchanged. This
+    instance-only wrapper also covers aliased robot methods and helper functions.
+    """
+    from pyrualean.hosts.robodojo_native import STATEFUL
+    execute = toolkit.execute_tool
+
+    def guarded(name: str, input_dict: dict[str, Any]) -> Any:
+        if name not in STATEFUL:
+            return execute(name, input_dict)
+        policy.before_native_action(name, input_dict)
+        before = backend.env_steps()
+        try:
+            return execute(name, input_dict)
+        finally:
+            policy.after_native_action(name, before, backend.env_steps())
+
+    toolkit.execute_tool = guarded
 
 def _read_native_outcome(out_dir: Path, task: str, layout: int) -> dict[str, Any]:
     """Read one finalized native trial; called after the client has stopped.
@@ -174,7 +196,9 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
                 api_key_env: str | None = None, robot: str = "robodojo_xpl_rgb",
                 boot_options: dict[str, Any] | None = None, runtime: str = "codex",
                 primitives: str = "no-vla", images: str = "on-motion",
-                feedback: str = "rich", **compatibility: Any) -> dict[str, Any]:
+                feedback: str = "rich", tool_set: str = "strong-grasp",
+                task_conditions: bool = False,
+                **compatibility: Any) -> dict[str, Any]:
     """Fresh native scene, fresh policy/agent, frozen tool, native scoring/video.
 
     API matches the deployment runner's PyRUA keyword surface. Only explicit
@@ -191,6 +215,10 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
         raise ValueError("harness v0.1 requires cells/codex/no-vla")
     if robot != "robodojo_xpl_rgb":
         raise ValueError("this controlled Test runner requires RGB-only RoboDojo")
+    if tool_set not in ("pyrua", "strong-grasp"):
+        raise ValueError("tool_set must be pyrua or strong-grasp")
+    if type(task_conditions) is not bool:
+        raise ValueError("task_conditions must be boolean")
     if (not math.isfinite(float(budget_s)) or float(budget_s) <= 0 or
             not isinstance(max_turns, int) or isinstance(max_turns, bool) or max_turns < 1):
         raise ValueError("positive budget_s and max_turns required")
@@ -206,14 +234,20 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
     from pyrualean.hosts.common import stop_all
     from pyrualean.mcp_server import ArmMcpServer
     from pyrualean.robots import get_adapter
-    from strong_grasp import install, grasp
     adapter = get_adapter(robot)
+    if tool_set == "pyrua" and hasattr(adapter.robot_cls, "grasp"):
+        raise RuntimeError("original PyRUA tools require a clean, unpatched robot class")
+    install, grasp = None, None
+    if tool_set == "strong-grasp":
+        from strong_grasp import install, grasp
     host = adapter.host_module()
     ledger = Ledger()
     started = time.perf_counter()
     result: dict[str, Any] = {
         "schema": "harness-native-test-v1", "system": "harness",
-        "framework_version": "0.1.0", "arm": arm, "runtime": runtime,
+        "framework_version": "0.2.0", "arm": arm, "runtime": runtime,
+        "tool_set": tool_set, "task_conditions": task_conditions,
+        "agent_features": {"disabled": list(DISABLED_FEATURES)},
         "robot": robot, "backend": robot, "task": cell.task, "suite": cell.suite,
         "seed": cell.seed, "model": model, "reasoning_effort": reasoning_effort,
         "max_turns": max_turns, "timeout_s": budget_s, "images": images,
@@ -221,6 +255,11 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
         "status": "boot_error", "finish": None, "error": None,
         "generation": None, "startup_s": None, "policy_wall_s": None,
         "total_wall_s": None, "tool_turns": 0, "calls": 0,
+        "task_wall_s": None,
+        "task_timing": {"start": "initial task card, RGB and robot tools ready",
+                        "end": "first observed native episode end or explicit conclusion",
+                        "excludes": ["GPU queue", "native scene initialization", "robot tool initialization", "teardown"],
+                        "includes": ["framework planning", "model reasoning", "robot tools", "feedback"]},
         "env_steps": 0, "env_steps_total": None, "notes": [],
         "protocol": {"fresh_agent_per_scene": True, "test_reset": False,
                      "cross_scene_learning": False, "automatic_replays": False,
@@ -233,18 +272,32 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
     old_cwd = Path.cwd()
     generation = None
     native_end_observed = False
+    task_started, task_ended = None, None
     try:
         native_toolkit, daemons = host.boot(cell, out_dir, **(boot_options or {}))
-        install(native_toolkit, robot_cls=adapter.robot_cls)
+        if install is not None:
+            install(native_toolkit, robot_cls=adapter.robot_cls)
         backend = host.make_backend(native_toolkit)
         card = host.dump_card(native_toolkit, cell, out_dir)
+        task_started = time.perf_counter()
+        result["task_card_ready_at"] = time.time()
         robo = adapter.robot_cls(backend, ledger=ledger, primitives=primitives)
         policy = CodePolicy(robo, workspace, max_turns=max_turns, images=images,
-                            feedback=feedback, grasp=grasp)
+                            feedback=feedback, grasp=grasp,
+                            task_conditions=task_conditions, initial_evidence=True)
+        if task_conditions:
+            _guard_native_actions(native_toolkit, backend, policy)
+        result["robot_tools"] = {"native_handlers": sorted(getattr(native_toolkit, "_tools", {})),
+                                  "grasp_installed": hasattr(robo, "grasp"),
+                                  "global_grasp_supplied": grasp is not None}
+        if tool_set == "pyrua" and (result["robot_tools"]["grasp_installed"] or
+                                      "strong_grasp" in getattr(native_toolkit, "_tools", {})):
+            raise RuntimeError("unexpected strong grasp injection in original-tool mode")
         result["task_language"] = card.task_language
         result["max_episode_steps"] = card.max_env_steps
-        result["startup_s"] = time.perf_counter() - started
-        for name in ("pyrualean", "strong_grasp", "harnesslab"):
+        result["startup_s"] = task_started - started
+        for name in (("pyrualean", "strong_grasp", "harnesslab") if grasp is not None
+                     else ("pyrualean", "harnesslab")):
             module = importlib.import_module(name)
             root = Path(inspect.getfile(module)).resolve().parent
             result["dependencies"][name] = {"path": str(root),
@@ -252,7 +305,8 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
                            hashlib.sha256(path.read_bytes()).hexdigest()
                            for path in sorted(root.rglob("*.py"))}}
         prompt = build_prompt(adapter, card, max_turns=max_turns,
-                              images=images, feedback=feedback)
+                              images=images, feedback=feedback,
+                              tool_set=tool_set, task_conditions=task_conditions)
         (out_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         result["prompt"] = {"sha256": hashlib.sha256(prompt.encode()).hexdigest(),
                             "images": list(card.images.values())}
@@ -266,10 +320,12 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
         write_json(out_dir / "result.json", result)
         policy_started = time.perf_counter()
         def observe_native_end():
-            nonlocal native_end_observed
+            nonlocal native_end_observed, task_ended
             callback = getattr(backend, "episode_over", None)
             over = bool(callback()) if callable(callback) else False
             native_end_observed = native_end_observed or over
+            if over and task_ended is None:
+                task_ended = time.perf_counter()
             return over
         generation = run_codex(prompt, list(card.images.values()), toolkit=policy,
             model=model, reasoning_effort=reasoning_effort, budget_s=budget_s,
@@ -282,6 +338,8 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
         result["finish"] = policy.finish
         # The same native client used by PyRUA supplies final success and video.
         backend.conclude()
+        if task_ended is None:
+            task_ended = time.perf_counter()
         result["environment_success"] = bool(backend.solved())
         result["env_steps_total"] = backend.env_steps()
         result["native_reports"] = [str(path.relative_to(out_dir))
@@ -294,6 +352,9 @@ def run_episode(cell: Any, out_dir: Path, *, arm: str = "cells", model: str,
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
     finally:
+        if task_started is not None:
+            result["task_wall_s"] = max(0.0, (task_ended or time.perf_counter()) - task_started)
+            result["task_timing"]["end_observed"] = task_ended is not None
         if policy is not None:
             result["tool_turns"], result["finish"] = len(policy.turns), policy.finish
             result["sandbox_flags"] = policy.sandbox_flags

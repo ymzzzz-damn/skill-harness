@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from harnesslab.policy import CodePolicy
 from harnesslab.serialization import jsonable
+from test_task_contract import example_plan, assessment
 
 @dataclass
 class GraspReport:
@@ -144,6 +145,121 @@ class PolicyTests(unittest.TestCase):
     def test_syntax_error_is_feedback_and_next_cell_can_recover(self):
         self.assertEqual(self.execute("if").result["exception"]["type"], "SyntaxError")
         self.assertEqual(self.execute("3").result["value"], 3)
+
+    def enable_conditions_with_native_dispatch(self):
+        # A real dispatch boundary: Robot methods, aliases and loops all reach
+        # this toolkit. No source-code recognition is involved in authorization.
+        outer = self
+        class Native:
+            invocations = 0
+            def execute_tool(self, name, arguments):
+                self.invocations += 1
+                outer.robo._backend.steps += 3
+                if arguments.get("fail"):
+                    raise ValueError("partially executed primitive")
+                return {"position": [1, 2, 3]}
+        native = Native()
+        def move(fail=False):
+            self.robo._ledger.records.append(Record())
+            return native.execute_tool("native_move", {"fail": fail})
+        self.robo.move = move
+        self.policy = policy(self.robo, self.workspace, task_conditions=True)
+        original = native.execute_tool
+        def guarded(name, arguments):
+            self.policy.before_native_action(name, arguments)
+            before = self.robo._backend.env_steps()
+            try:
+                return original(name, arguments)
+            finally:
+                self.policy.after_native_action(name, before, self.robo._backend.env_steps())
+        native.execute_tool = guarded
+        return native
+
+    def planned(self, code="robo.move()", **metadata):
+        return self.policy.execute_tool("python", {"code": code, "task_plan": example_plan(),
+            "task_intent": {"subtask": "prepare", "purpose": "establish support", "preserve": []},
+            **metadata})
+
+    def test_native_boundary_blocks_aliases_without_plan_before_physics(self):
+        native = self.enable_conditions_with_native_dispatch()
+        result = self.execute("alias = robo.move\nfor _ in range(2):\n    alias()")
+        self.assertEqual(result.result["exception"]["type"], "ContractError")
+        self.assertEqual(native.invocations, 0)
+        self.assertEqual(self.robo._backend.steps, 0)
+        self.assertFalse(result.result["physical"]["moved"])
+
+    def test_registration_then_real_native_dispatch_and_fresh_feedback(self):
+        native = self.enable_conditions_with_native_dispatch()
+        result = self.planned("alias = robo.move\nalias()\nalias()")
+        self.assertNotIn("exception", result.result)
+        self.assertEqual(native.invocations, 2)
+        self.assertEqual(self.robo._backend.steps, 6)
+        self.assertEqual(self.policy.contract.epoch, 2)
+        self.assertTrue((self.workspace.parent / "task_contract.json").exists())
+        self.assertTrue((self.workspace.parent / "task_condition_events.json").exists())
+        self.assertEqual(self.policy.contract.evidence[1]["step"], 6)
+
+    def test_observation_allowed_before_registration_and_bad_plan_cannot_move(self):
+        native = self.enable_conditions_with_native_dispatch()
+        self.assertNotIn("exception", self.execute("display(b'camera')").result)
+        broken = example_plan()
+        broken["subtasks"][0]["completion"] = ["missing"]
+        result = self.planned(task_plan=broken)
+        self.assertEqual(result.result["exception"]["type"], "ContractError")
+        self.assertEqual(native.invocations, 0)
+        self.assertIsNone(self.policy.contract.plan)
+
+    def test_partial_failed_motion_invalidates_state_and_retains_evidence(self):
+        native = self.enable_conditions_with_native_dispatch()
+        result = self.planned("robo.move(fail=True)",
+                              task_update=[assessment("goal"), assessment("achieved")])
+        self.assertEqual(native.invocations, 1)
+        self.assertEqual(result.result["exception"]["type"], "ValueError")
+        self.assertEqual(self.policy.contract.assessments["goal"]["status"], "unknown")
+        self.assertTrue(self.policy.contract.current("achieved", 3))
+        self.assertEqual(self.policy.contract.evidence[1]["step"], 3)
+        self.assertTrue(result.images)
+
+    def test_success_gate_needs_current_cited_evidence_and_keeps_native_separate(self):
+        self.enable_conditions_with_native_dispatch()
+        self.planned()
+        stale = self.policy.execute_tool("finish", {"status": "success", "summary": "done",
+            "task_update": [assessment("goal"), assessment("support")]})
+        self.assertIn("stale", stale.result["error"])
+        self.assertIsNone(self.policy.finish)
+        fresh = self.policy.execute_tool("finish", {"status": "success", "summary": "observed",
+            "task_update": [assessment("goal", cell=1), assessment("support", cell=1)]})
+        self.assertEqual(fresh.result["agent_finish"]["status"], "success")
+        self.assertNotEqual(fresh.result["native_success"], True)
+
+    def test_same_cell_code_derived_update_and_after_metadata_are_supported(self):
+        self.enable_conditions_with_native_dispatch()
+        result = self.planned("position = robo.move()\n"
+            "{'task_update': [{'id': 'goal', 'status': 'satisfied' if position['position'][2] == 3 else 'unknown', "
+            "'evidence': [{'cell': 1, 'detail': 'public returned position'}]}]}",
+            task_update_after=[assessment("support", cell=1)])
+        self.assertNotIn("exception", result.result)
+        self.assertEqual(self.policy.contract.success_errors(3), [])
+
+    def test_failed_precondition_blocks_next_phase_until_fresh_reassessment(self):
+        native = self.enable_conditions_with_native_dispatch()
+        self.planned()
+        intent = {"subtask": "place", "purpose": "complete relation", "preserve": ["support"]}
+        failed = self.policy.execute_tool("python", {"code": "robo.move()", "task_intent": intent})
+        self.assertEqual(failed.result["exception"]["type"], "ContractError")
+        self.assertEqual(native.invocations, 1)
+        recovered = self.policy.execute_tool("python", {"code": "robo.move()", "task_intent": intent,
+            "task_update": [assessment(key, cell=1) for key in ("ready", "achieved", "support")]})
+        self.assertNotIn("exception", recovered.result)
+        self.assertEqual(native.invocations, 2)
+
+    def test_original_tool_specs_do_not_advertise_custom_grasp(self):
+        specs = self.policy.get_tools_spec()
+        self.assertNotIn("robo.grasp", specs[0]["description"])
+        self.assertNotIn("task_plan", specs[0]["input_schema"]["properties"])
+        self.assertNotIn("grasp", self.policy._globals)
+        self.enable_conditions_with_native_dispatch()
+        self.assertIn("task_plan", self.policy.get_tools_spec()[0]["input_schema"]["properties"])
 
 if __name__ == "__main__":
     unittest.main()
