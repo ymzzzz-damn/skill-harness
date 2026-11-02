@@ -47,7 +47,6 @@ def manifests():
         'metadata': {'name': NAME, 'namespace': NAMESPACE, 'labels': labels},
         'spec': {'backoffLimit': 0, 'template': {'metadata': {'labels': labels}, 'spec': {
             'restartPolicy': 'Never', 'schedulerName': 'default-scheduler',
-            'preemptionPolicy': 'Never',
             'serviceAccountName': NAME, 'automountServiceAccountToken': True,
             'imagePullSecrets': [{'name': 'registry-secret'}],
             'enableServiceLinks': False,
@@ -85,7 +84,7 @@ def validate_job(job):
     assert 'nodeSelector' not in spec
     assert 'nodeName' not in spec and not spec.get('tolerations')
     assert spec['schedulerName'] == 'default-scheduler'
-    assert spec['preemptionPolicy'] == 'Never'
+    assert 'preemptionPolicy' not in spec and not spec.get('priorityClassName')
     assert spec['containers'][0]['resources'] == resources()
     assert spec['containers'][0]['image'] == IMAGE
     assert any(e.get('name') == 'HARNESS_ALLOWED_GPU_PRODUCTS' and e.get('value') == ','.join(ALLOWED_GPU_PRODUCTS)

@@ -57,8 +57,12 @@ runtime dependency. No third-party library source is vendored here.
 
 The Job uses `default-scheduler`, requests eight GPUs and eight workers, and
 accepts current product labels `NVIDIA-RPBZZZ6` or
-`NVIDIA-GeForce-RTX-5090`. It specifies `preemptionPolicy=Never`, no fixed
-hostname/nodeName, custom priority or additional taint tolerations. This shared queue is explicitly
+`NVIDIA-GeForce-RTX-5090`. It specifies no fixed hostname/nodeName, custom
+PriorityClass, explicit Pod preemption policy or additional taint tolerations.
+The cluster requires the standard priority0 shared queue and derives
+`PreemptLowerPriority` through its admission controller; an explicit `Never`
+field is rejected. This deployment leaves that cluster-managed policy unchanged
+and never manually evicts or cancels another workload. This shared queue is explicitly
 authorized for this experiment. Bootstrap reads its own actual Pod through
 the Kubernetes API, checks UID, node, phase, image and eight-GPU allocation
 against the Downward API, then checks actual NVML/CUDA models and UUID mapping

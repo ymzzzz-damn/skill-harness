@@ -41,13 +41,14 @@ def validate_pod(pod, env):
                        and t.get('effect') == 'NoExecute' for t in tolerations)
         if spec.get('schedulerName') != 'default-scheduler' or spec.get('nodeSelector') or not ordinary:
             raise RuntimeError('Unexpected fixed-node/taint/priority scheduling override')
-    if spec.get('priority', 0) != 0:
+    if spec.get('priority', 0) != 0 or spec.get('priorityClassName'):
         raise RuntimeError('Experiment must keep ordinary queue priority')
-    if spec.get('preemptionPolicy') != 'Never':
-        raise RuntimeError('Experiment allocation must not preempt other workloads')
     return {'pod': meta['name'], 'uid': meta['uid'], 'namespace': meta['namespace'],
         'node': spec['nodeName'], 'phase': status['phase'], 'gpu_request': GPU_COUNT,
         'allowed_gpu_products': list(ALLOWED_GPU_PRODUCTS), 'verified_at': now(),
+        'priority': spec.get('priority', 0),
+        'admission_preemption_policy': spec.get('preemptionPolicy'),
+        'scheduling_policy': 'standard shared queue; no custom PriorityClass or manual eviction of other workloads',
         'identity_source': 'own live Kubernetes Pod API, matched against Downward API',
         'image': container[0]['image'],
         'container_image_ids': [s.get('imageID') for s in status.get('containerStatuses', [])]}

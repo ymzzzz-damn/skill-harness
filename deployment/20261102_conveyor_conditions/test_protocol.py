@@ -37,16 +37,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotIn('nodeSelector',spec)
         self.assertNotIn('tolerations',spec)
         self.assertNotIn('priorityClassName',spec)
-        self.assertEqual(spec['preemptionPolicy'],'Never')
+        self.assertNotIn('preemptionPolicy',spec)
         self.assertEqual(spec['containers'][0]['resources']['limits']['nvidia.com/gpu'],'8')
         self.assertEqual(docs[1]['rules'],[{'apiGroups':[''],'resources':['pods'],'verbs':['get']}])
         self.assertNotIn('api_key',json.dumps(docs))
+        unsupported=copy.deepcopy(docs[-1])
+        unsupported['spec']['template']['spec']['preemptionPolicy']='Never'
+        with self.assertRaises(AssertionError):prepare.validate_job(unsupported)
 
     def fixture(self):
         job=prepare.manifests()[-1]
         pod={'metadata':{'name':'example','uid':'pod-uid','namespace':NAMESPACE},
              'spec':copy.deepcopy(job['spec']['template']['spec']), 'status':{'phase':'Running'}}
         pod['spec']['nodeName']='192.168.48.200'
+        pod['spec']['preemptionPolicy']='PreemptLowerPriority'  # cluster admission default
         pod['spec']['tolerations']=[{'key':'node.kubernetes.io/not-ready','effect':'NoExecute','operator':'Exists'}]
         env={'HARNESS_POD_NAME':'example','HARNESS_POD_UID':'pod-uid',
              'HARNESS_POD_NAMESPACE':NAMESPACE,'HARNESS_NODE_NAME':'192.168.48.200',
@@ -65,7 +69,7 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):identity.validate_pod(wrong,env)
         wrong=copy.deepcopy(pod);wrong['spec']['priority']=100
         with self.assertRaises(RuntimeError):identity.validate_pod(wrong,env)
-        wrong=copy.deepcopy(pod);wrong['spec']['preemptionPolicy']='PreemptLowerPriority'
+        wrong=copy.deepcopy(pod);wrong['spec']['priorityClassName']='custom-priority'
         with self.assertRaises(RuntimeError):identity.validate_pod(wrong,env)
 
     def test_gpu_inventory_rejects_wrong_count_duplicate_and_hardware(self):
