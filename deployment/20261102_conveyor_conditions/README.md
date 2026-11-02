@@ -40,6 +40,12 @@ runtime files belong to `runtime/20261102_conveyor_conditions/`.
 
 PyRUA-Lean supplies its existing Python environment, SAM3 source/checkpoint,
 RoboDojo source/assets, Codex executable and private provider configuration.
+The registered SAM3 editable source is
+`PyRUA-Lean/runtime/vendor/sam3-c1f6b1e83967c912f675d8975d437ccdc41e17d8/`.
+Preparation validates and freezes its `direct_url.json`, `.pth` loader and
+finder mapping using plain metadata reads; it never executes the container-only
+venv Python on the access host. Bootstrap later checks the imported SAM3 path
+inside the runner container.
 The private configuration path is supplied through `HARNESS_PLANNER_CONFIG`;
 values are read only by each activated episode and are never included in source
 or manifests. `registry-secret` is referenced by name as an existing image-pull

@@ -18,6 +18,8 @@ TASK = 'pick_from_conveyor_by_image'
 ALLOWED_GPU_PRODUCTS = ('NVIDIA-RPBZZZ6', 'NVIDIA-GeForce-RTX-5090')
 NAMESPACE = 'dreamzero-training'
 PYRUA_COMMIT = 'ffad6d439f926eea450e9e3d3b3a106438b141b1'
+SAM3_COMMIT = 'c1f6b1e83967c912f675d8975d437ccdc41e17d8'
+SAM3_SOURCE = PYRUA / 'runtime/vendor' / ('sam3-' + SAM3_COMMIT)
 BASELINE_COMMIT = 'ec2b94afb0161e6aab91d213221d33f5797fee86'
 IMAGE = ('registry.d-robotics.cc/auwomo-auwomo/robodojo-tswam-full:20260901-f2'
          '@sha256:834a60f7a9e36254b5ac8fc1ec4689b19d9e4eb413836e65812e4047940499a3')

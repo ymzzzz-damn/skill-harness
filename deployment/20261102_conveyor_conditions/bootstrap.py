@@ -53,9 +53,11 @@ def main():
         run([str(PYTHON),'-m','pip','install','--no-deps','--no-index','--target',str(deps),str(OPENCV_WHEEL)],
             logs/'install-opencv.log',env)
     run([str(PYTHON),'-B','-c',
-         'import sys,cv2,numpy,torch,sam3,mcp,harnesslab; '
+         'import sys,cv2,numpy,torch,sam3,mcp,harnesslab; from pathlib import Path; '
          'assert "strong_grasp" not in sys.modules; '
-         'print({"cv2":cv2.__version__,"numpy":numpy.__version__,"torch":torch.__version__})'],
+         'assert str(Path(sam3.__file__).resolve().parent) == sys.argv[1]; '
+         'print({"cv2":cv2.__version__,"numpy":numpy.__version__,"torch":torch.__version__,"sam3":sam3.__file__})',
+         str(Path(frozen['sources']['sam3']['root'])/'sam3')],
         logs/'dependency-imports.log',env)
     run([str(PYTHON),'-B','-m','unittest','discover','-s',str(SOURCE/'tests'),'-v'],logs/'harness-tests.log',env)
     run([str(PYTHON),'-B','-m','unittest','discover','-s',str(D),'-p','test_*.py','-v'],logs/'deployment-tests.log',env)

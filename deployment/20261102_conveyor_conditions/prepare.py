@@ -1,13 +1,15 @@
 """Prepare immutable inputs and queue manifests. This command never submits a Job."""
 from __future__ import annotations
 import argparse
+import ast
 import json
 from pathlib import Path
 import subprocess
+import urllib.parse
 from protocol import (ALLOWED_GPU_PRODUCTS, ASSETS, BASELINE_COMMIT, CODEX, CODEX_SHA256, CONTROLS,
                       DEPLOYMENT, GPU_COUNT, IMAGE, NAMESPACE,
                       OPENCV_SHA256, OPENCV_WHEEL, OUTPUT, PIP_ARCHIVE, PROJECT, PYRUA, PYRUA_COMMIT, PYTHON,
-                      RUNTIME, SOURCE, now, sha, source_files, stream_sha, verify_freeze, write)
+                      RUNTIME, SAM3_COMMIT, SOURCE, now, sha, source_files, stream_sha, verify_freeze, write)
 
 NAME = 'yumuzhen-conveyor-conditions-20261102'
 
@@ -95,6 +97,35 @@ def validate_job(job):
     return True
 
 
+def sam3_registration(pyr=PYRUA):
+    """Read editable-install metadata without executing its Python or .pth code."""
+    pyr = Path(pyr)
+    expected = pyr / 'runtime/vendor' / ('sam3-' + SAM3_COMMIT)
+    candidates = sorted((pyr / 'runtime/policy-venv/lib').glob(
+        'python*/site-packages/sam3-0.1.0.dist-info/direct_url.json'))
+    if len(candidates) != 1:
+        raise RuntimeError('Expected exactly one registered SAM3 editable install')
+    metadata = candidates[0]
+    direct = json.loads(metadata.read_text())
+    url = urllib.parse.urlparse(direct.get('url', ''))
+    root = Path(urllib.parse.unquote(url.path))
+    if (url.scheme != 'file' or url.netloc or direct.get('dir_info', {}).get('editable') is not True
+            or root != expected or not (root / 'sam3/__init__.py').is_file()):
+        raise RuntimeError('SAM3 editable registration differs from the reviewed pinned source')
+    site = metadata.parent.parent
+    pth = site / '__editable__.sam3-0.1.0.pth'
+    finder = site / '__editable___sam3_0_1_0_finder.py'
+    if pth.read_text().strip() != 'import __editable___sam3_0_1_0_finder; __editable___sam3_0_1_0_finder.install()':
+        raise RuntimeError('Unexpected SAM3 editable .pth loader')
+    mapping = None
+    for node in ast.parse(finder.read_text()).body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == 'MAPPING':
+            mapping = ast.literal_eval(node.value)
+    if not isinstance(mapping, dict) or mapping.get('sam3') != str(root / 'sam3'):
+        raise RuntimeError('SAM3 editable finder mapping differs from registered source')
+    return {'root': root, 'package': root / 'sam3', 'metadata_files': [metadata, pth, finder]}
+
+
 def freeze():
     commit = subprocess.check_output(['git', '-C', str(PYRUA / 'source'), 'rev-parse', 'HEAD'], text=True).strip()
     dirty = subprocess.check_output(['git', '-C', str(PYRUA / 'source'), 'status', '--porcelain'], text=True)
@@ -107,22 +138,25 @@ def freeze():
         raise RuntimeError('Codex executable drift')
     if sha(OPENCV_WHEEL) != OPENCV_SHA256:
         raise RuntimeError('Reviewed local OpenCV compatibility wheel changed')
+    sam3 = sam3_registration()
     files = [task, CODEX, OPENCV_WHEEL, PYRUA / 'source/LICENSE',
              PYRUA / 'runtime/robodojo-source/scripts/eval_policy.sh',
              PYRUA / 'runtime/robodojo-source/env/reward_manager/reward_manager.py',
              PYRUA / 'runtime/robodojo-source/env/reward_manager/func_parser.py',
              PIP_ARCHIVE / 'config/extension.toml']
+    files += sam3['metadata_files']
     files += [ASSETS / f'{CONTROLS["task"]}_{layout}.json' for layout in range(55)]
     checkpoint = PYRUA / 'runtime/checkpoints/sam3.pt'
     if checkpoint.stat().st_size != 3450062241:
         raise RuntimeError('SAM3 checkpoint size no longer matches reviewed runtime')
+    roots = {'harness': SOURCE, 'pyrua': PYRUA / 'source', 'deployment': DEPLOYMENT,
+             'sam3': sam3['root']}
+    for name, root in roots.items():
+        if not root.is_dir() or not source_files(root):
+            raise RuntimeError('Required source/dependency tree is missing or empty: ' + name + ' at ' + str(root))
     checkpoint_hash = stream_sha(checkpoint)
     if checkpoint_hash != '9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e':
         raise RuntimeError('SAM3 checkpoint integrity check failed')
-    roots = {'harness': SOURCE, 'pyrua': PYRUA / 'source', 'deployment': DEPLOYMENT,
-             'sam3': PYRUA / 'runtime/vendor/sam3'}
-    if any(not root.is_dir() or not source_files(root) for root in roots.values()):
-        raise RuntimeError('A required source/dependency tree is missing or empty')
     return {'schema': 'conveyor-condition-experiment/v1', 'prepared_at': now(),
         'controls': CONTROLS, 'allowed_gpu_products': list(ALLOWED_GPU_PRODUCTS),
         'sources': {name: {'root': str(root), 'files': source_files(root)} for name, root in roots.items()},
@@ -130,6 +164,8 @@ def freeze():
         'checkpoint': {'path': str(checkpoint), 'size': checkpoint.stat().st_size,
                        'mtime_ns': checkpoint.stat().st_mtime_ns, 'sha256': checkpoint_hash},
         'dependencies': {'runtime_python': str(PYTHON), 'sam3_checkpoint': str(PYRUA / 'runtime/checkpoints/sam3.pt'),
+            'sam3_source': str(sam3['root']), 'sam3_commit': SAM3_COMMIT,
+            'sam3_registration_files': list(map(str, sam3['metadata_files'])),
             'sam3_checkpoint_sha256': '9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e',
             'native_source': str(PYRUA / 'runtime/robodojo-source'),
             'xpolicylab_root': '/opt/robodojo/XPolicyLab', 'pyrua_license': 'Apache-2.0',

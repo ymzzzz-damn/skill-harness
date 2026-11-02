@@ -8,7 +8,7 @@ from unittest.mock import patch
 import identity
 import prepare
 from protocol import (ALLOWED_GPU_PRODUCTS, CONTROLS, NAMESPACE, episode_dir,
-                      full_plan, pair_plan, source_files, verify_freeze)
+                      SAM3_COMMIT, full_plan, pair_plan, source_files, verify_freeze)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -88,6 +88,26 @@ class ProtocolTests(unittest.TestCase):
             (root/'extra.py').unlink()
             (root/'policy.py').write_text('value=3\n')
             with self.assertRaises(RuntimeError):verify_freeze(frozen)
+
+    def test_sam3_editable_registration_uses_versioned_path_without_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            pyr=Path(temp)/'PyRUA-Lean'
+            root=pyr/'runtime/vendor'/('sam3-'+SAM3_COMMIT)
+            (root/'sam3').mkdir(parents=True)
+            (root/'sam3/__init__.py').write_text('raise RuntimeError("must not import during preparation")\n')
+            site=pyr/'runtime/policy-venv/lib/python3.11/site-packages'
+            metadata=site/'sam3-0.1.0.dist-info/direct_url.json'
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text(json.dumps({'dir_info':{'editable':True},'url':root.as_uri()}))
+            pth=site/'__editable__.sam3-0.1.0.pth'
+            pth.write_text('import __editable___sam3_0_1_0_finder; __editable___sam3_0_1_0_finder.install()')
+            finder=site/'__editable___sam3_0_1_0_finder.py'
+            finder.write_text('MAPPING: dict[str, str] = '+repr({'sam3':str(root/'sam3')})+'\nraise RuntimeError("do not execute")\n')
+            registration=prepare.sam3_registration(pyr)
+            self.assertEqual(registration['root'],root)
+            self.assertEqual(registration['metadata_files'],[metadata,pth,finder])
+            finder.write_text('MAPPING: dict[str, str] = {"sam3":"/wrong/package"}\n')
+            with self.assertRaises(RuntimeError):prepare.sam3_registration(pyr)
 
 
 if __name__=='__main__': unittest.main()
