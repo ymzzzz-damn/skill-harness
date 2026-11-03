@@ -1,0 +1,47 @@
+{
+  "first_party_reuse": [
+    {
+      "file": "native_startup.py",
+      "source": "/mnt/auwomo-data/yumuzhen/exp/grasp_tool_20261029/deployment/recovery_20261030_shared_r6/native_startup.py",
+      "original_sha256": "42c62d268ca5b55d56e804b7c4f72a85c47dd6a7f687398658c90d188d0cfd3b",
+      "changes": "Project-local lock paths, receipt schema, environment prefix and attribution only. Native task and scoring untouched."
+    },
+    {
+      "file": "boot_recovery.py",
+      "source": "/mnt/auwomo-data/yumuzhen/exp/grasp_tool_20261029/deployment/recovery_20261030_shared_r6/boot_recovery.py",
+      "original_sha256": "4cab190870dc31de4a635696f5329b28a0310b26d2ebaf75a105150ee607d214",
+      "changes": "Attribution; remove irrelevant strong-grasp-artifact check, preserving strict no-observation/no-model/no-action/no-report retry boundary."
+    },
+    {
+      "file": "scene_excluded_timing.py",
+      "source": "deployment/20261102_conveyor_conditions_reporting/scene_excluded_timing.py",
+      "original_sha256": "8392468e6a08b3881353e553e1e5691a6e23d264a831b750df5e4ef09226c059",
+      "changes": "Byte-for-byte copy. Batch invokes its one-shot generic --root/--out CLI; no watch is started."
+    }
+  ],
+  "ownership": "These two scripts were authored for this user's workspace during the earlier experiment; they are first-party deployment code, not copied third-party library code. The original files contained no external license header.",
+  "codex_capability_check": {
+    "date": "2026-11-02",
+    "version": "codex-cli 0.159.2",
+    "binary_sha256": "1748767b230ebfc3d4ab7e4e254920d0c0ad9691fd8c11f190e7d44511a4a92e",
+    "method": "Read-only features list and exec --help inside existing qwenpaw Pod; CODEX_HOME points at a read-only source directory with no auth/config file; no model or native action.",
+    "observed": "features list: shell_tool stable true; --disable shell_tool --disable unified_exec features list: shell_tool stable false, unified_exec remains true. exec --help confirms repeatable --disable.",
+    "policy": "Disable shell_tool in both arms. Do not claim unified_exec disabled in this binary."
+  },
+  "external_runtime_dependency": {
+    "project": "PyRUA-Lean",
+    "commit": "ffad6d439f926eea450e9e3d3b3a106438b141b1",
+    "license": "Apache-2.0",
+    "license_file": "/mnt/auwomo-data/yumuzhen/PyRUA-Lean/source/LICENSE",
+    "mode": "Unchanged runtime import; no vendored PyRUA source in this repository."
+  },
+  "deployment_template": {
+    "source": "deployment/20261102_conveyor_conditions",
+    "changes": "Separate Nov3 cohort; dynamic treatment queue and persisted hardware pairing, cap48 receipts, boot4/cache prewarm, lightweight utilization, fresh host node-health request/receipt gate, no smoke or measured replay."
+  },
+  "runtime_cache_dependency": {
+    "source": "/mnt/auwomo-data/yumuzhen/harness/runtime/20261102_conveyor_conditions/extension-cache/isaacsim.asset.importer.urdf-2.4.31+107.3.3.lx64.r.cp311",
+    "tree_sha256": "e5709552257704c948b0f5cd3ec83ba2d271d69c50c06723b889594cfee54b34",
+    "mode": "Existing licensed Isaac Sim runtime package, copied only into this harness runtime cache after exact hash verification; package bytes are not vendored into this repository."
+  }
+}
