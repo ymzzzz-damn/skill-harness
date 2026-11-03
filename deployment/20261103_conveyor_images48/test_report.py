@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from protocol import CONTROLS, ORIGINAL_NATIVE_HANDLERS, TASK, episode_dir, sha, write
-from report import arm_summary, inspect_episode, model_accounting, native_outcome, paired, stats
+from report import arm_summary,build_report,inspect_episode,model_accounting,native_outcome,paired,stats
 
 
 class ReportTests(unittest.TestCase):
@@ -211,6 +211,37 @@ class ReportTests(unittest.TestCase):
             mapping=json.loads((Path(temp)/'treatment-mapping.json').read_text())
             mapping['layouts']['3']['gpu']=7;write(Path(temp)/'treatment-mapping.json',mapping)
             self.assertFalse(inspect_episode('full','conditions',3,temp)['valid'])
+
+    def test_aggregate_inspection_exception_keeps_all_cases_and_no_invented_failure_or_time(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out=self.make_episode(temp,success=True)
+            write(Path(temp)/'workers/conditions_layout03.json',{'arm':'conditions','layout':3,
+                'attempted':True,'closed':True,'status':'inspection_error','success':True,'task_wall_s':999})
+            write(out/'result.json',[])  # Reproduces a per-case inspect exception.
+            report=build_report(temp)
+            self.assertEqual(len(report['episodes']),110)
+            row=next(r for r in report['episodes'] if r['arm']=='conditions' and r['layout']==3)
+            self.assertTrue(row['attempted']);self.assertTrue(row['closed']);self.assertFalse(row['valid'])
+            self.assertEqual(row['status'],'inspection_error');self.assertIsNone(row['success'])
+            self.assertIsNone(row['task_wall_s']);self.assertIsNone(row['native_actions'])
+            self.assertEqual(row['gpu_uuid'],'GPU-2')
+            self.assertEqual(report['arms']['conditions']['attempted'],1)
+            self.assertEqual(report['arms']['conditions']['native_outcomes'],0)
+            self.assertIsNone(report['arms']['conditions']['all_attempted_metrics']['task_wall_s']['sum'])
+            self.assertEqual(report['arms']['control']['pending'],55)
+            self.assertEqual(report['inspection_errors'][0]['layout'],3)
+            self.assertIsNone(report['paired']['success_rate_difference'])
+
+    def test_inspection_error_without_worker_uses_terminal_launch_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out=episode_dir('full','control',7,temp)
+            write(out/'result.json',[])  # no trustworthy result/worker object
+            write(out.parent/'launch_status.json',{'status':'launcher_error'})
+            report=build_report(temp)
+            row=next(r for r in report['episodes'] if r['arm']=='control' and r['layout']==7)
+            self.assertTrue(row['attempted']);self.assertTrue(row['closed'])
+            self.assertIsNone(row['success']);self.assertFalse(row['native_record_valid'])
+            self.assertEqual(report['arms']['control']['execution_or_identity_errors'],1)
 
     def test_missing_values_not_zero_and_response_ids_deduplicated(self):
         self.assertIsNone(stats([None])['mean'])

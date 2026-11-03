@@ -387,13 +387,58 @@ def paired(records, replicates=10000):
         'interpretation': 'Fixed treatment-first stage order is user requested, not randomized. Same seed0 layouts and physical GPU mapping support this cohort comparison, not unseen-layout generalization.'}
 
 
+def inspection_error_record(phase,arm,layout,output,exc):
+    """Keep one unreadable case visible without inventing a native verdict/time."""
+    out=episode_dir(phase,arm,layout,output)
+    def object_at(path):
+        value=load(path,{})
+        return value if isinstance(value,dict) else {}
+    worker=object_at(Path(output)/'workers'/f'{arm}_layout{layout:02d}.json')
+    manifest=object_at(out/'experiment.json')
+    result=object_at(out/'result.json')
+    launch=object_at(out.parent/'launch_status.json')
+    pod=manifest.get('pod',{})
+    if not isinstance(pod,dict):pod={}
+    attempted=bool(worker.get('attempted') or worker or manifest or result or launch or out.exists())
+    closed=bool(worker.get('closed') is True
+        or result.get('status') not in ('running',None)
+        or launch.get('status') in ('launcher_error','infrastructure_blocked','finished'))
+    error=type(exc).__name__+': '+str(exc)
+    row={'phase':phase,'arm':arm,'layout':layout,'attempted':attempted,'closed':closed,
+        'valid':False,'native_record_valid':False,'success':None,'status':'inspection_error','error':error,
+        'inspection_error':error,'identity_errors':['case inspection failed; outcome/timing unverified'],
+        'native':{'valid':False,'success':None,'errors':['inspection failed; native verdict unavailable'],'path':None},
+        'gpu_lane':manifest.get('gpu',worker.get('gpu_lane')),
+        'gpu_uuid':manifest.get('gpu_uuid',worker.get('gpu_uuid')),
+        'pod_uid':pod.get('uid',worker.get('pod_uid')),'node':pod.get('node',worker.get('node')),
+        'layout_sha256':manifest.get('layout_sha256',worker.get('layout_sha256')),
+        'freeze_sha256':manifest.get('source_freeze_sha256',worker.get('freeze_sha256')),
+        'episode_directory':str(out),'result_sha256':None,'tool_provenance_sha256':None,
+        'worker_status_observed':worker.get('status'),'launch_status_observed':launch.get('status'),
+        'result_status_observed':result.get('status')}
+    # A prior worker record can establish an attempt/closure, not validated metrics
+    # after the current authoritative inspection failed.
+    for key in ('task_wall_s','startup_s','policy_wall_s','tool_wall_s','non_tool_agent_s','total_wall_s',
+        'prior_initialization_wall_s','total_wall_s_including_initialization_retries','native_actions',
+        'python_decisions','model_responses_observed','token_usage_observed'):
+        row[key]=None
+    return row
+
+
+def safe_inspect_episode(phase,arm,layout,output):
+    try:return inspect_episode(phase,arm,layout,output,require_video=True)
+    except Exception as exc:return inspection_error_record(phase,arm,layout,output,exc)
+
+
 def build_report(output=OUTPUT, phase='full'):
     if phase!='full':raise ValueError('This cohort has no separate smoke episodes')
     layouts=range(55);arms=ARMS
-    rows = [inspect_episode(phase,arm,layout,output,require_video=True) for arm in arms for layout in layouts]
+    rows = [safe_inspect_episode(phase,arm,layout,output) for arm in arms for layout in layouts]
     return {'schema': 'conveyor-condition-report/v1', 'at': now(), 'phase': phase, 'controls': CONTROLS,
         'arms': {arm: arm_summary([r for r in rows if r['arm'] == arm]) for arm in arms},
-        'paired': paired(rows) if phase == 'full' else None, 'episodes': rows,
+        'paired':paired(rows),'episodes':rows,
+        'inspection_errors':[{'arm':r['arm'],'layout':r['layout'],'error':r['inspection_error']}
+            for r in rows if r.get('inspection_error')],
         'stage_elapsed_wall': load(Path(output) / 'stage_times.json', {}),
         'utilization':load(Path(output)/'utilization/summary.json',{}),
         'treatment_assignments':load(Path(output)/'treatment-mapping.json',{}),
